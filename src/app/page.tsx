@@ -51,7 +51,6 @@ interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
-  points: number;
   isAdmin?: boolean;
   groupIds?: string[];
 }
@@ -271,6 +270,10 @@ export default function Home() {
   // Data lists
   const [matches, setMatches] = useState<Match[]>([]);
   const [predictions, setPredictions] = useState<{ [matchId: string]: Prediction }>({});
+  // Every prediction in the pool (all users). Source of truth for the standing:
+  // the leaderboard total is derived from these + match results, never from a
+  // denormalized users.points counter (which used to drift out of sync).
+  const [allPredictions, setAllPredictions] = useState<Prediction[]>([]);
   const [leaderboard, setLeaderboard] = useState<UserProfile[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
@@ -297,8 +300,6 @@ export default function Home() {
   const [adminUserPredictions, setAdminUserPredictions] = useState<{ [matchId: string]: Prediction }>({});
   const [adminUserDrafts, setAdminUserDrafts] = useState<{ [matchId: string]: { goals1: string; goals2: string } }>({});
   const [adminSavingUserPreds, setAdminSavingUserPreds] = useState<{ [matchId: string]: boolean }>({});
-  const [adminRecalculating, setAdminRecalculating] = useState(false);
-  const [recalculatingUserId, setRecalculatingUserId] = useState<string | null>(null);
   const [adminSyncing, setAdminSyncing] = useState(false);
   const [hidePastMatchesAdmin, setHidePastMatchesAdmin] = useState(true);
   const [editingTeamsMatchId, setEditingTeamsMatchId] = useState<string | null>(null);
@@ -616,8 +617,11 @@ export default function Home() {
       if (err.code !== "permission-denied") console.error("Predictions listener error:", err);
     });
 
-    // 3. Sync Leaderboard / Users
-    const qUsers = query(collection(db, "users"), orderBy("points", "desc"));
+    // 3. Sync Leaderboard / Users. Only user metadata (name, email, groups) —
+    // the standing is computed client-side from predictions, so we no longer
+    // order by (or even read) a stored points field. Ranking happens in
+    // `rankedLeaderboard` once totals are computed.
+    const qUsers = query(collection(db, "users"));
     const unsubUsers = onSnapshot(qUsers, (snapshot) => {
       const list: UserProfile[] = [];
       snapshot.forEach((doc) => {
@@ -628,6 +632,16 @@ export default function Home() {
     }, (err) => {
       if (err.code !== "permission-denied") console.error("Users listener error:", err);
       setDataLoading(false);
+    });
+
+    // 3b. Sync every prediction in the pool. These feed the cumulative-points
+    // computation that produces each user's standing (last closed match total).
+    const unsubAllPreds = onSnapshot(collection(db, "predictions"), (snapshot) => {
+      const list: Prediction[] = [];
+      snapshot.forEach((doc) => list.push(doc.data() as Prediction));
+      setAllPredictions(list);
+    }, (err) => {
+      if (err.code !== "permission-denied") console.error("All predictions listener error:", err);
     });
 
     // 4. Sync Groups
@@ -646,6 +660,7 @@ export default function Home() {
       unsubMatches();
       unsubPreds();
       unsubUsers();
+      unsubAllPreds();
       unsubGroups();
     };
   }, [user, profile?.isAdmin]);
@@ -867,24 +882,8 @@ export default function Home() {
         goals2: g2,
         points: pts
       });
-
-      const userPredsSnap = await getDocs(
-        query(collection(db, "predictions"), where("userId", "==", adminSelectedUserId))
-      );
-      let totalPoints = 0;
-      userPredsSnap.forEach((pDoc) => {
-        const pred = pDoc.data() as Prediction;
-        const match = matches.find(m => m.id === pred.matchId);
-        const isFinal = match?.result ? (match.result.isFinal ?? true) : false;
-        if (isFinal) {
-          totalPoints += pred.points || 0;
-        }
-      });
-
-      await setDoc(doc(db, "users", adminSelectedUserId), {
-        points: totalPoints
-      }, { merge: true });
-
+      // The standing recomputes itself from predictions + results on the client;
+      // no denormalized users.points to maintain here anymore.
     } catch (err) {
       console.error("Error saving user prediction by admin:", err);
       alert("Error al guardar la predicción del usuario.");
@@ -1046,185 +1045,9 @@ export default function Home() {
     }
   };
 
-  // Recompute the running cumulative points (prevPoints / afterMatchPoints) for
-  // every prediction, walking each user's predictions in chronological order,
-  // and persist both the per-prediction breakdown and each user's total.
-  // The user total is taken from the afterMatchPoints of their last finished
-  // match (== the running total), so the standing is fully explained by the chain.
-  const persistCumulativeScores = async (matchesArr: Match[]) => {
-    const predsSnap = await getDocs(collection(db, "predictions"));
-    const preds: { id: string; data: Prediction }[] = [];
-    const predInputs = predsSnap.docs.map((d) => {
-      const data = d.data() as Prediction;
-      preds.push({ id: d.id, data });
-      return {
-        id: d.id,
-        userId: data.userId,
-        matchId: data.matchId,
-        goals1: data.goals1,
-        goals2: data.goals2,
-      };
-    });
-
-    const { byPrediction, userTotals } = computeCumulativePoints(
-      predInputs,
-      buildCumulativeMatches(matchesArr)
-    );
-
-    // Firestore caps a writeBatch at 500 operations. A full backfill rewrites
-    // hundreds of predictions plus every user, so we commit in chunks. Users are
-    // written last so that users.points always ends up reflecting the freshly
-    // computed chain total (the afterMatchPoints of each user's last final match).
-    const BATCH_LIMIT = 450;
-    let batch = writeBatch(db);
-    let opsInBatch = 0;
-    const stageWrite = async (ref: ReturnType<typeof doc>, data: Record<string, unknown>, merge: boolean) => {
-      if (merge) batch.set(ref, data, { merge: true });
-      else batch.update(ref, data);
-      opsInBatch++;
-      if (opsInBatch >= BATCH_LIMIT) {
-        await batch.commit();
-        batch = writeBatch(db);
-        opsInBatch = 0;
-      }
-    };
-
-    for (const { id, data } of preds) {
-      const cp = byPrediction.get(id);
-      if (!cp) continue;
-      const changed =
-        data.points !== cp.points ||
-        (data.prevPoints ?? null) !== cp.prevPoints ||
-        (data.afterMatchPoints ?? null) !== cp.afterMatchPoints;
-      if (changed) {
-        await stageWrite(
-          doc(db, "predictions", id),
-          { points: cp.points, prevPoints: cp.prevPoints, afterMatchPoints: cp.afterMatchPoints },
-          false
-        );
-      }
-    }
-
-    const usersSnap = await getDocs(collection(db, "users"));
-    for (const uDoc of usersSnap.docs) {
-      const uid = uDoc.id;
-      if (uid && uid !== "undefined") {
-        await stageWrite(doc(db, "users", uid), { points: userTotals.get(uid) || 0 }, true);
-      }
-    }
-
-    if (opsInBatch > 0) {
-      await batch.commit();
-    }
-  };
-
-  // Fast path for the common case: one or more matches are finalized AT THE END
-  // of the chronological chain. Because users.points already equals each user's
-  // last afterMatchPoints, a new final match simply advances their total by the
-  // points scored in it — no full re-read/rewrite of the whole chain needed.
-  // Only the finalized matches' predictions (and the affected users) are touched.
-  //
-  // Returns false when it's NOT a clean append (out-of-order finalize), so the
-  // caller falls back to the full persistCumulativeScores recompute. Editing an
-  // already-final result must be handled by the caller (force fallback), since
-  // that shifts the tail of the chain.
-  const tryIncrementalFinalize = async (
-    matchesArr: Match[],
-    newlyFinalMatchIds: string[]
-  ): Promise<boolean> => {
-    const ordered = buildCumulativeMatches(matchesArr);
-    const orderById = new Map(ordered.map((m) => [m.id, m.order]));
-    const byId = new Map(ordered.map((m) => [m.id, m]));
-
-    // Keep only the ids that are actually final now.
-    const finalIds = newlyFinalMatchIds.filter((id) => {
-      const m = byId.get(id);
-      return m && m.result && m.result.isFinal !== false;
-    });
-    if (finalIds.length === 0) return true; // nothing points-relevant to persist
-
-    finalIds.sort((a, b) => (orderById.get(a) ?? 0) - (orderById.get(b) ?? 0));
-
-    // Highest chronological order among matches that were ALREADY final,
-    // excluding the ones we're finalizing right now.
-    const finalIdSet = new Set(finalIds);
-    let maxExistingFinalOrder = -1;
-    for (const m of ordered) {
-      if (finalIdSet.has(m.id)) continue;
-      if (m.result && m.result.isFinal !== false && m.order > maxExistingFinalOrder) {
-        maxExistingFinalOrder = m.order;
-      }
-    }
-
-    // Clean append only if every newly-final match sits after all existing finals.
-    if ((orderById.get(finalIds[0]) ?? 0) <= maxExistingFinalOrder) return false;
-
-    // Current user totals (== last afterMatchPoints) are the running start point.
-    const usersSnap = await getDocs(collection(db, "users"));
-    const runningByUser = new Map<string, number>();
-    usersSnap.forEach((u) => runningByUser.set(u.id, (u.data().points as number) || 0));
-
-    // Predictions for the finalized matches only ('in' supports up to 30 ids).
-    type PredRow = { id: string; userId: string; matchId: string; goals1: number; goals2: number };
-    const byUser = new Map<string, PredRow[]>();
-    for (let i = 0; i < finalIds.length; i += 30) {
-      const chunk = finalIds.slice(i, i + 30);
-      const snap = await getDocs(query(collection(db, "predictions"), where("matchId", "in", chunk)));
-      snap.forEach((d) => {
-        const data = d.data() as Prediction;
-        const row: PredRow = {
-          id: d.id,
-          userId: data.userId,
-          matchId: data.matchId,
-          goals1: data.goals1,
-          goals2: data.goals2,
-        };
-        if (!byUser.has(row.userId)) byUser.set(row.userId, []);
-        byUser.get(row.userId)!.push(row);
-      });
-    }
-
-    const BATCH_LIMIT = 450;
-    let batch = writeBatch(db);
-    let ops = 0;
-    const flush = async () => {
-      if (ops >= BATCH_LIMIT) {
-        await batch.commit();
-        batch = writeBatch(db);
-        ops = 0;
-      }
-    };
-
-    const touchedUsers = new Set<string>();
-    for (const [userId, preds] of byUser) {
-      preds.sort((a, b) => (orderById.get(a.matchId) ?? 0) - (orderById.get(b.matchId) ?? 0));
-      let running = runningByUser.get(userId) ?? 0;
-      for (const p of preds) {
-        const m = byId.get(p.matchId)!;
-        const pts = calculatePoints(p.goals1, p.goals2, m.result!.goals1, m.result!.goals2, m.group);
-        const prevPoints = running;
-        running = running + pts;
-        batch.update(doc(db, "predictions", p.id), { points: pts, prevPoints, afterMatchPoints: running });
-        ops++;
-        await flush();
-      }
-      runningByUser.set(userId, running);
-      touchedUsers.add(userId);
-    }
-
-    // Users who scored nothing new (no prediction for the finalized matches) keep
-    // their total untouched — no record is created for them (see design B).
-    for (const userId of touchedUsers) {
-      batch.set(doc(db, "users", userId), { points: runningByUser.get(userId) || 0 }, { merge: true });
-      ops++;
-      await flush();
-    }
-
-    if (ops > 0) await batch.commit();
-    return true;
-  };
-
-  // Admin: Set Match Result and Update Scores
+  // Admin: set a match result. The standing (leaderboard, per-user breakdown)
+  // is derived live on every client from predictions + match results, so there
+  // is nothing to recompute or persist here beyond the result itself.
   const saveMatchResult = async (matchId: string) => {
     const draft = adminResults[matchId];
     if (!draft || draft.goals1 === "" || draft.goals2 === "") return;
@@ -1235,171 +1058,24 @@ export default function Home() {
 
     setAdminSaving(prev => ({ ...prev, [matchId]: true }));
 
-    // Was this match already final before we touched it? Editing an existing
-    // final result shifts the tail of the chain, so it forces the full recompute.
     const isFinalNow = draft.isFinal ?? true;
-    const prevMatch = matches.find((m) => m.id === matchId);
-    const wasAlreadyFinal = !!(prevMatch?.result && prevMatch.result.isFinal !== false);
 
     try {
-      // 1. Update Match Doc
+      // 1. Update the match result.
       const matchRef = doc(db, "matches", matchId);
       await setDoc(matchRef, {
         result: { goals1: rg1, goals2: rg2, isFinal: isFinalNow }
       }, { merge: true });
 
-      // 2. Update the cumulative chain. Read matches fresh and overlay the result
-      // we just wrote (in case the fresh read raced the write).
-      const matchesSnap = await getDocs(collection(db, "matches"));
-      const matchesArr: Match[] = matchesSnap.docs.map((d) => {
-        const m = { ...(d.data() as Match), id: d.id };
-        if (d.id === matchId) {
-          m.result = { goals1: rg1, goals2: rg2, isFinal: isFinalNow };
-        }
-        return m;
-      });
-
-      // Fast path when finalizing a new match at the end of the chain; otherwise
-      // (edit of an existing final, or out-of-order finalize) full recompute.
-      let handled = false;
-      if (isFinalNow && !wasAlreadyFinal) {
-        handled = await tryIncrementalFinalize(matchesArr, [matchId]);
-      }
-      if (!handled) {
-        await persistCumulativeScores(matchesArr);
-      }
-
-      // Bump matches_version so clients invalidate their active cache on next load
+      // 2. Bump matches_version so clients invalidate their active cache on next load.
       await setDoc(doc(db, "meta", "matches_version"), { updatedAt: Date.now() }, { merge: true });
 
-      alert("Resultado guardado y puntajes recalculados exitosamente.");
+      alert("Resultado guardado. Los puntajes se recalculan automáticamente.");
     } catch (err) {
       console.error("Error setting match result:", err);
       alert("Error al guardar resultado.");
     } finally {
       setAdminSaving(prev => ({ ...prev, [matchId]: false }));
-    }
-  };
-
-  const recalculateAllScores = async () => {
-    if (adminRecalculating) return;
-    const confirmRecalc = window.confirm("¿Estás seguro de que deseas recalcular y actualizar en la base de datos los puntos de todos los usuarios y predicciones? Esto resolverá cualquier descuadre.");
-    if (!confirmRecalc) return;
-
-    setAdminRecalculating(true);
-    try {
-      const matchesSnap = await getDocs(collection(db, "matches"));
-      const matchesArr: Match[] = matchesSnap.docs.map((d) => ({
-        ...(d.data() as Match),
-        id: d.id,
-      }));
-
-      await persistCumulativeScores(matchesArr);
-      alert("¡Todos los puntajes de las predicciones y de los usuarios han sido recalculados y guardados con éxito en la base de datos!");
-    } catch (err) {
-      console.error("Error recalculating all scores:", err);
-      alert("Error al recalcular todos los puntajes en Firestore.");
-    } finally {
-      setAdminRecalculating(false);
-    }
-  };
-
-  // Admin: recompute the full cumulative chain for a SINGLE user. Walks only that
-  // user's predictions in chronological order, so it fixes any drift between the
-  // running breakdown (prevPoints / afterMatchPoints) and users.points — the
-  // discrepancy the incremental fast-path can leave when matches finalize out of
-  // order — without re-reading/rewriting every other participant's chain.
-  const recalculateUserScores = async (target: UserProfile) => {
-    if (!profile?.isAdmin || recalculatingUserId) return;
-    const confirmRecalc = window.confirm(
-      `¿Recalcular los puntos de ${target.displayName}? Se recorrerán sus predicciones en orden cronológico para corregir cualquier descuadre en su acumulado.`
-    );
-    if (!confirmRecalc) return;
-
-    setRecalculatingUserId(target.uid);
-    try {
-      // Fresh matches so the chronological ordering and results are up to date.
-      const matchesSnap = await getDocs(collection(db, "matches"));
-      const matchesArr: Match[] = matchesSnap.docs.map((d) => ({
-        ...(d.data() as Match),
-        id: d.id,
-      }));
-
-      // Only this user's predictions (≤ one per match, well under any batch cap).
-      const predsSnap = await getDocs(
-        query(collection(db, "predictions"), where("userId", "==", target.uid))
-      );
-      const preds: { id: string; data: Prediction }[] = [];
-      const predInputs = predsSnap.docs.map((d) => {
-        const data = d.data() as Prediction;
-        preds.push({ id: d.id, data });
-        return {
-          id: d.id,
-          userId: data.userId,
-          matchId: data.matchId,
-          goals1: data.goals1,
-          goals2: data.goals2,
-        };
-      });
-
-      const { byPrediction, userTotals } = computeCumulativePoints(
-        predInputs,
-        buildCumulativeMatches(matchesArr)
-      );
-
-      const batch = writeBatch(db);
-      let changedCount = 0;
-      for (const { id, data } of preds) {
-        const cp = byPrediction.get(id);
-        if (!cp) continue;
-        const changed =
-          data.points !== cp.points ||
-          (data.prevPoints ?? null) !== cp.prevPoints ||
-          (data.afterMatchPoints ?? null) !== cp.afterMatchPoints;
-        if (changed) {
-          batch.update(doc(db, "predictions", id), {
-            points: cp.points,
-            prevPoints: cp.prevPoints,
-            afterMatchPoints: cp.afterMatchPoints,
-          });
-          changedCount++;
-        }
-      }
-
-      const newTotal = userTotals.get(target.uid) || 0;
-      batch.set(doc(db, "users", target.uid), { points: newTotal }, { merge: true });
-      await batch.commit();
-
-      // The modal's prediction list is a one-off read (not a live subscription),
-      // so refresh it — and the header total — in place. The leaderboard updates
-      // itself through its users onSnapshot.
-      const cpByMatchId = new Map(
-        preds.map(({ id, data }) => [data.matchId, byPrediction.get(id)])
-      );
-      setViewingUserPredictions((prev) =>
-        prev.map((p) => {
-          const cp = cpByMatchId.get(p.matchId);
-          if (!cp) return p;
-          return {
-            ...p,
-            points: cp.points,
-            prevPoints: cp.prevPoints,
-            afterMatchPoints: cp.afterMatchPoints,
-          };
-        })
-      );
-      setViewingUser((prev) =>
-        prev && prev.uid === target.uid ? { ...prev, points: newTotal } : prev
-      );
-
-      alert(
-        `Puntos de ${target.displayName} recalculados. ${changedCount} predicción(es) actualizada(s). Total: ${newTotal} pts.`
-      );
-    } catch (err) {
-      console.error("Error recalculating user scores:", err);
-      alert("Error al recalcular los puntos de este usuario.");
-    } finally {
-      setRecalculatingUserId(null);
     }
   };
 
@@ -1496,15 +1172,10 @@ export default function Home() {
 
       let updatedMatchesCount = 0;
       const batch = writeBatch(db);
-      // Track which matches became final in this sync (for the incremental fast
-      // path) and whether any already-final result was edited (forces fallback).
-      const newlyFinalIds: string[] = [];
-      let hasFinalEdit = false;
 
       for (const dbMatch of dbMatches) {
         const dbMatchIdNum = parseInt(dbMatch.id, 10);
         let fixture = null;
-        const wasFinalBefore = !!(dbMatch.result && dbMatch.result.isFinal !== false);
 
         if (dbMatchIdNum >= 73) {
           fixture = apiFixtures.find((f: any) => parseInt(f.id, 10) === dbMatchIdNum);
@@ -1578,13 +1249,8 @@ export default function Home() {
           batch.update(doc(db, "matches", dbMatch.id), updateData);
           updatedMatchesCount++;
 
-          // Classify the result change for the persistence strategy below.
-          if (resultChanged && newResult && newResult.isFinal) {
-            if (wasFinalBefore) hasFinalEdit = true; // score correction on a final match
-            else newlyFinalIds.push(dbMatch.id); // fresh finalization
-          }
-
-          // Actualizar temporalmente para el cálculo de abajo
+          // Keep the in-memory copy current (not strictly needed anymore, but
+          // harmless and keeps dbMatches consistent for any later use).
           dbMatch.result = newResult;
           dbMatch.team1 = updatedTeam1;
           dbMatch.team2 = updatedTeam2;
@@ -1592,23 +1258,13 @@ export default function Home() {
       }
 
       if (updatedMatchesCount > 0) {
-        // Commit match/team updates first, then update the cumulative chain.
-        // dbMatches already carries the updated results (mutated above).
+        // Persist the match/team updates. Standings recompute themselves on every
+        // client from predictions + results — no server-side score pass needed.
         await batch.commit();
-
-        // Fast path when matches were finalized at the end of the chain (and no
-        // already-final result was edited); otherwise full recompute.
-        let handled = false;
-        if (!hasFinalEdit) {
-          handled = await tryIncrementalFinalize(dbMatches, newlyFinalIds);
-        }
-        if (!handled) {
-          await persistCumulativeScores(dbMatches);
-        }
 
         // Bump matches_version so clients invalidate their active cache on next load
         await setDoc(doc(db, "meta", "matches_version"), { updatedAt: Date.now() }, { merge: true });
-        alert(`Sincronización exitosa. Se actualizaron ${updatedMatchesCount} partidos y se recalcularon todos los puntajes.`);
+        alert(`Sincronización exitosa. Se actualizaron ${updatedMatchesCount} partidos. Los puntajes se recalculan automáticamente.`);
       } else {
         await batch.commit();
         alert("Sincronización completada. No hubo cambios en los marcadores ni equipos.");
@@ -1797,13 +1453,38 @@ export default function Home() {
     }
   };
 
+  // Cumulative points for the whole pool, computed live from raw predictions +
+  // match results. `userTotals` is each user's standing (the afterMatchPoints of
+  // their last closed match); `byPrediction` is the per-prediction breakdown
+  // (points earned / running total before & after). Nothing here is read from a
+  // stored aggregate, so it can never drift the way users.points used to.
+  const scores = React.useMemo(() => {
+    const inputs = allPredictions.map((p) => ({
+      id: p.id,
+      userId: p.userId,
+      matchId: p.matchId,
+      goals1: p.goals1,
+      goals2: p.goals2,
+    }));
+    return computeCumulativePoints(inputs, buildCumulativeMatches(matches));
+  }, [allPredictions, matches]);
+
+  const myTotal = user ? scores.userTotals.get(user.uid) ?? 0 : 0;
+
+  // Leaderboard with each user's computed standing, ranked high → low.
+  const rankedLeaderboard = React.useMemo(() => {
+    return leaderboard
+      .map((u) => ({ ...u, points: scores.userTotals.get(u.uid) ?? 0 }))
+      .sort((a, b) => b.points - a.points);
+  }, [leaderboard, scores]);
+
   // Filtered leaderboard based on selected group
   const displayedLeaderboard = React.useMemo(() => {
     if (selectedGroupId === "global") {
-      return leaderboard;
+      return rankedLeaderboard;
     }
-    return leaderboard.filter((u) => u.groupIds?.includes(selectedGroupId));
-  }, [leaderboard, selectedGroupId]);
+    return rankedLeaderboard.filter((u) => u.groupIds?.includes(selectedGroupId));
+  }, [rankedLeaderboard, selectedGroupId]);
 
   // Unique list of rounds for filtering
   const rounds = ["Todos", "Matchday 1", "Matchday 2", "Matchday 3", "Matchday 4", "Matchday 5", "Matchday 6", "Matchday 7", "Matchday 8", "Matchday 9", "Matchday 10", "Matchday 11", "Matchday 12", "Matchday 13", "Matchday 14", "Matchday 15", "Matchday 16", "Matchday 17", "Round of 32", "Round of 16", "Quarter-final", "Semi-final", "Match for third place", "Final"];
@@ -2183,7 +1864,7 @@ export default function Home() {
             <div className="flex items-center space-x-2">
               <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-full px-4 py-1.5 flex items-center space-x-1.5">
                 <span className="text-amber-400 font-bold">⭐</span>
-                <span className="font-extrabold text-emerald-400 text-sm">{profile?.points ?? 0} Pts</span>
+                <span className="font-extrabold text-emerald-400 text-sm">{myTotal} Pts</span>
               </div>
             </div>
 
@@ -2631,11 +2312,16 @@ export default function Home() {
                                             <span className="text-xs bg-slate-950 border border-slate-800 text-slate-400 px-2.5 py-1 rounded-lg">
                                               Final: {match.result?.goals1} - {match.result?.goals2}
                                             </span>
-                                            {pred ? (
-                                              <span className={`text-xs font-bold px-2 py-1 rounded-lg ${getPointsBadgeClass(pred?.points ?? 0)}`}>
-                                                +{pred?.points ?? 0} Pts
-                                              </span>
-                                            ) : (
+                                            {pred ? (() => {
+                                              const matchPts = match.result
+                                                ? calculatePoints(pred.goals1, pred.goals2, match.result.goals1, match.result.goals2, match.group)
+                                                : 0;
+                                              return (
+                                                <span className={`text-xs font-bold px-2 py-1 rounded-lg ${getPointsBadgeClass(matchPts)}`}>
+                                                  +{matchPts} Pts
+                                                </span>
+                                              );
+                                            })() : (
                                               <span className="text-xs font-bold px-2 py-1 rounded-lg bg-slate-950 border border-slate-850/80 text-rose-500">
                                                 Sin pronóstico
                                               </span>
@@ -2907,13 +2593,6 @@ export default function Home() {
                             className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5"
                           >
                             {adminSyncing ? "Sincronizando..." : "⚡ Sincronizar Marcadores API"}
-                          </button>
-                          <button
-                            onClick={recalculateAllScores}
-                            disabled={adminRecalculating}
-                            className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5"
-                          >
-                            {adminRecalculating ? "Recalculando..." : "🔄 Recalcular Todos los Puntos"}
                           </button>
                         </div>
                       )}
@@ -3562,10 +3241,15 @@ export default function Home() {
                                           </div>
 
                                           {/* Points Indicator if match has result */}
-                                          {hasResult && pred && (
-                                            <span className={`text-xs font-bold px-2 py-1.5 rounded-lg border ${getPointsBadgeClass(pred.points)}`}>
-                                              +{pred.points} Pts
-                                            </span>
+                                          {hasResult && pred && match.result && (
+                                            (() => {
+                                              const matchPts = calculatePoints(pred.goals1, pred.goals2, match.result.goals1, match.result.goals2, match.group);
+                                              return (
+                                                <span className={`text-xs font-bold px-2 py-1.5 rounded-lg border ${getPointsBadgeClass(matchPts)}`}>
+                                                  +{matchPts} Pts
+                                                </span>
+                                              );
+                                            })()
                                           )}
 
                                           <button
@@ -3830,7 +3514,7 @@ export default function Home() {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-950 text-slate-350 text-xs">
-                            {leaderboard.map((u) => {
+                            {rankedLeaderboard.map((u) => {
                               const isMe = u.uid === user?.uid;
                               return (
                                 <tr key={u.uid} className="hover:bg-slate-900/20">
@@ -3953,7 +3637,7 @@ export default function Home() {
                   <span>Pronósticos de {viewingUser.displayName}</span>
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Total de puntos calculados: <span className="text-emerald-400 font-extrabold">{viewingUser.points} Pts</span>
+                  Total de puntos calculados: <span className="text-emerald-400 font-extrabold">{scores.userTotals.get(viewingUser.uid) ?? 0} Pts</span>
                 </p>
               </div>
               <button
@@ -4141,21 +3825,25 @@ export default function Home() {
                             )}
                           </div>
 
-                          {/* Running cumulative breakdown: standing before/after this match */}
-                          {pred && (
-                            <div className="w-full flex justify-center">
-                              <PointsBreakdown
-                                prevPoints={pred.prevPoints}
-                                matchPoints={
-                                  match.result
-                                    ? calculatePoints(pred.goals1, pred.goals2, liveGoals1Card, liveGoals2Card, match.group)
-                                    : 0
-                                }
-                                afterMatchPoints={pred.afterMatchPoints}
-                                isLive={isLiveCard}
-                              />
-                            </div>
-                          )}
+                          {/* Running cumulative breakdown: standing before/after this
+                              match, computed live (never read from stored aggregates). */}
+                          {pred && (() => {
+                            const cp = scores.byPrediction.get(pred.id);
+                            return (
+                              <div className="w-full flex justify-center">
+                                <PointsBreakdown
+                                  prevPoints={cp?.prevPoints}
+                                  matchPoints={
+                                    match.result
+                                      ? calculatePoints(pred.goals1, pred.goals2, liveGoals1Card, liveGoals2Card, match.group)
+                                      : 0
+                                  }
+                                  afterMatchPoints={cp?.afterMatchPoints}
+                                  isLive={isLiveCard}
+                                />
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
 
@@ -4174,19 +3862,7 @@ export default function Home() {
             </div>
 
             {/* Modal Footer */}
-            <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-3 shrink-0">
-              {profile?.isAdmin ? (
-                <button
-                  onClick={() => recalculateUserScores(viewingUser)}
-                  disabled={recalculatingUserId === viewingUser.uid}
-                  title="Recorre las predicciones de este usuario en orden y corrige su acumulado"
-                  className="px-4 py-2.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 font-bold rounded-xl text-xs transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-                >
-                  {recalculatingUserId === viewingUser.uid ? "Recalculando..." : "🔄 Recalcular este usuario"}
-                </button>
-              ) : (
-                <span />
-              )}
+            <div className="pt-2 border-t border-slate-800 flex items-center justify-end gap-3 shrink-0">
               <button
                 onClick={() => {
                   setViewingUser(null);

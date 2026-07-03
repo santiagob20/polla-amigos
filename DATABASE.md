@@ -18,7 +18,6 @@ erDiagram
         string uid PK "= ID del documento (Firebase Auth UID)"
         string email
         string displayName
-        number points "puntaje acumulado"
         bool isAdmin "superadmin (opcional)"
         array groupIds "IDs de grupos a los que pertenece"
     }
@@ -73,9 +72,18 @@ Perfil de cada usuario. El **ID del documento es el UID de Firebase Auth**.
 | `uid` | string | UID (igual al ID del documento). |
 | `email` | string | Correo del usuario. |
 | `displayName` | string | Nombre visible. |
-| `points` | number | Puntaje total acumulado (recalculado al evaluar predicciones). |
 | `isAdmin` | boolean? | `true` = superadministrador global. |
 | `groupIds` | string[]? | IDs de los grupos a los que pertenece. |
+
+> **Sin puntaje denormalizado.** El escalafón ya **no** guarda un `points` en
+> `users`. La app calcula el puntaje de cada usuario en el cliente a partir de
+> sus `predictions` y los `result` de los `matches` (ver `computeCumulativePoints`
+> en `src/lib/scoreCalculator.ts`): el total de un usuario es el acumulado
+> (`afterMatchPoints`) de su **último partido cerrado**. Al no depender de un
+> contador que se actualiza por separado, el escalafón no puede quedar
+> "atrasado" respecto a los resultados. Un usuario sin pronóstico para un
+> partido simplemente no suma en ese partido (no se crea ningún registro
+> vacío).
 
 ### `matches`
 Partidos del Mundial 2026 (sembrados desde `src/app/worldcup2026.json`, IDs `"1"`–`"104"`).
