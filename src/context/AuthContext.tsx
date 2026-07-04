@@ -16,6 +16,7 @@ interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
+  points: number;
   isAdmin?: boolean;
   groupIds?: string[];
 }
@@ -142,6 +143,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         uid: cred.user.uid,
         email: email,
         displayName: name,
+        points: 0,
       };
       await setDoc(doc(db, "users", cred.user.uid), newProfile);
       setProfile(newProfile);
