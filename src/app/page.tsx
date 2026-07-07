@@ -112,30 +112,50 @@ function PointsBreakdown({
   matchPoints,
   afterMatchPoints,
   isLive,
+  align = "end",
 }: {
   prevPoints?: number;
   matchPoints: number;
   afterMatchPoints?: number | null;
   isLive?: boolean;
+  align?: "end" | "center";
 }) {
   const prev = prevPoints ?? 0;
   const provisional = afterMatchPoints == null;
   const after = provisional ? prev + matchPoints : afterMatchPoints;
   return (
-    <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-semibold whitespace-nowrap">
-      <span>Antes <span className="text-slate-300 font-bold tabular-nums">{prev}</span></span>
-      <span className="text-slate-600">·</span>
-      <span className={matchPoints > 0 ? "text-emerald-400 font-bold" : "text-slate-500 font-bold"}>
-        +{matchPoints}
-      </span>
-      <span className="text-slate-600">·</span>
-      <span>
-        Después{" "}
-        <span className={`font-bold tabular-nums ${provisional ? "text-amber-400" : "text-emerald-400"}`}>
-          {after}
+    <div className="mt-2 pt-2.5 border-t border-slate-800/80 w-full">
+      <div
+        className={`flex flex-col gap-1 ${
+          align === "center" ? "items-center text-center" : "items-end text-right"
+        }`}
+      >
+        <span className="text-[9px] uppercase tracking-widest text-slate-500 font-bold">
+          Puntos acumulados
         </span>
-        {provisional && isLive ? " (prov.)" : ""}
-      </span>
+        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-semibold whitespace-nowrap">
+          <span>
+            Antes{" "}
+            <span className="text-slate-300 font-bold tabular-nums">{prev}</span>
+          </span>
+          <span className="text-slate-600">·</span>
+          <span className={matchPoints > 0 ? "text-emerald-400 font-bold" : "text-slate-500 font-bold"}>
+            +{matchPoints}
+          </span>
+          <span className="text-slate-600">·</span>
+          <span>
+            Después{" "}
+            <span
+              className={`font-bold tabular-nums ${
+                provisional ? "text-amber-400" : "text-emerald-400"
+              }`}
+            >
+              {after}
+            </span>
+            {provisional && isLive ? " (prov.)" : ""}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2419,7 +2439,7 @@ export default function Home() {
                                   className={`bg-slate-900/40 hover:bg-slate-900/60 transition-all border border-slate-900/80 hover:border-slate-800 rounded-2xl p-5 flex flex-col justify-between ${group.isArchived ? "opacity-80 border-slate-950/60" : ""}`}
                                 >
                                   {/* Match Header */}
-                                  <div className="flex justify-between items-center text-xs text-slate-400 border-b border-slate-950/60 pb-3 mb-4 relative">
+                                  <div className="flex justify-between items-center text-xs text-slate-400 pb-2 relative">
                                     <span className="font-bold text-emerald-500 flex items-center gap-1.5 flex-wrap">
                                       <span>{formatRoundName(match.round)} {match.group ? `• ${match.group}` : ""}</span>
                                       {!match.group && (
@@ -2455,7 +2475,7 @@ export default function Home() {
                                   </div>
 
                                   {/* Teams and Inputs */}
-                                  <div className="flex items-center justify-between gap-3 my-4">
+                                  <div className="flex items-center justify-between gap-3 pt-3 pb-1 border-t border-slate-800/80">
                                     {/* Team 1 */}
                                     {getFlagUrl(match.team1) ? (
                                       <button
@@ -2617,7 +2637,7 @@ export default function Home() {
                                   </div>
 
                                   {/* Match Footer */}
-                                  <div className="mt-4 pt-3 border-t border-slate-950/60 flex items-center justify-between">
+                                  <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between">
                                     <span className="text-[10px] text-slate-500 truncate max-w-[150px]">
                                       {match.ground}
                                     </span>
@@ -2704,18 +2724,16 @@ export default function Home() {
 
                                   {/* Running cumulative breakdown: standing before/after this match */}
                                   {pred && hasMatchStarted(match) && (
-                                    <div className="mt-2 flex justify-end">
-                                      <PointsBreakdown
-                                        prevPoints={pred.prevPoints}
-                                        matchPoints={
-                                          match.result
-                                            ? calculatePoints(pred.goals1, pred.goals2, match.result.goals1, match.result.goals2, match.group)
-                                            : 0
-                                        }
-                                        afterMatchPoints={pred.afterMatchPoints}
-                                        isLive={match.result == null || match.result.isFinal === false}
-                                      />
-                                    </div>
+                                    <PointsBreakdown
+                                      prevPoints={pred.prevPoints}
+                                      matchPoints={
+                                        match.result
+                                          ? calculatePoints(pred.goals1, pred.goals2, match.result.goals1, match.result.goals2, match.group)
+                                          : 0
+                                      }
+                                      afterMatchPoints={pred.afterMatchPoints}
+                                      isLive={match.result == null || match.result.isFinal === false}
+                                    />
                                   )}
                                 </div>
                               );
@@ -4046,9 +4064,9 @@ export default function Home() {
                     <div key={match.id} className="bg-slate-955/45 border border-slate-850 rounded-2xl p-4 flex flex-col gap-3 hover:bg-slate-955/80 transition-colors">
 
                       {/* Top section: round label + badges, team names — all centered */}
-                      <div className="flex flex-col items-center gap-1.5">
+                      <div className="flex flex-col items-center gap-0">
                         {/* Round / group + live badge */}
-                        <div className="flex items-center gap-2 flex-wrap justify-center">
+                        <div className="flex items-center gap-2 flex-wrap justify-center pb-2 w-full">
                           <span className="text-[10px] text-emerald-400 font-extrabold uppercase tracking-wider flex items-center gap-1.5">
                             <span>{formatRoundName(match.round)} {match.group ? `• ${match.group}` : ""}</span>
                             {!match.group && (
@@ -4064,6 +4082,7 @@ export default function Home() {
                             </span>
                           )}
                         </div>
+                        <div className="flex flex-col items-center gap-1.5 pt-2.5 border-t border-slate-800/80 w-full">
                         {/* Teams */}
                         <div className="font-extrabold text-sm text-slate-200 flex items-center gap-2 flex-wrap justify-center">
                           {getFlagUrl(match.team1) && (
@@ -4085,78 +4104,80 @@ export default function Home() {
                             Final: {match.result?.goals1} - {match.result?.goals2}
                           </span>
                         )}
+                        </div>
                       </div>
 
                       {/* Bottom row: only shown for started matches — live badge on left, prediction on right */}
                       {hasStarted && (
-                        <div className="flex items-center justify-center gap-3 flex-wrap">
-                          {/* Live score badge — only shown when match is live */}
-                          {isLiveCard && (
-                            <div className="inline-flex items-center bg-slate-950 border border-slate-800 rounded-xl overflow-hidden whitespace-nowrap">
-                              <span className="text-[11px] text-slate-100 font-bold px-2.5 py-1">
-                                En Vivo: <span className="text-amber-400 font-extrabold">{liveGoals1Card} - {liveGoals2Card}</span>
-                              </span>
-                              <div className="w-px h-5 bg-slate-800"></div>
-                              <button
-                                onClick={() => refreshLiveMatchScore(match.id)}
-                                disabled={refreshingMatches[match.id]}
-                                title="Actualizar marcador"
-                                className="px-2 py-1 hover:bg-slate-900 text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-50 flex items-center justify-center cursor-pointer"
-                              >
-                                <svg
-                                  className={`w-3.5 h-3.5 ${refreshingMatches[match.id] ? "animate-spin text-amber-500" : ""}`}
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2.5"
-                                  viewBox="0 0 24 24"
+                        <>
+                          <div className="flex items-center justify-center gap-3 flex-wrap">
+                            {/* Live score badge — only shown when match is live */}
+                            {isLiveCard && (
+                              <div className="inline-flex items-center bg-slate-950 border border-slate-800 rounded-xl overflow-hidden whitespace-nowrap">
+                                <span className="text-[11px] text-slate-100 font-bold px-2.5 py-1">
+                                  En Vivo: <span className="text-amber-400 font-extrabold">{liveGoals1Card} - {liveGoals2Card}</span>
+                                </span>
+                                <div className="w-px h-5 bg-slate-800"></div>
+                                <button
+                                  onClick={() => refreshLiveMatchScore(match.id)}
+                                  disabled={refreshingMatches[match.id]}
+                                  title="Actualizar marcador"
+                                  className="px-2 py-1 hover:bg-slate-900 text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-50 flex items-center justify-center cursor-pointer"
                                 >
-                                  <path
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
-                                  />
-                                </svg>
-                              </button>
-                            </div>
-                          )}
-
-                          {/* User prediction + points */}
-                          <div className="flex items-center gap-2">
-                            {pred ? (
-                              (() => {
-                                const currentPoints = calculatePoints(pred.goals1, pred.goals2, liveGoals1Card, liveGoals2Card, match.group);
-                                return (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs bg-slate-900 border border-slate-800 text-emerald-450 px-2 py-1 rounded-lg font-bold font-mono">
-                                      {pred.goals1} - {pred.goals2}
-                                    </span>
-                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-lg border ${getPointsBadgeClass(currentPoints)}`}>
-                                      +{currentPoints} Pts {match.result?.isFinal === false ? "(Prov.)" : ""}
-                                    </span>
-                                  </div>
-                                );
-                              })()
-                            ) : (
-                              <span className="text-[10px] text-rose-500 font-bold bg-rose-500/5 px-2.5 py-1 rounded-lg border border-rose-500/10">Sin pronóstico</span>
+                                  <svg
+                                    className={`w-3.5 h-3.5 ${refreshingMatches[match.id] ? "animate-spin text-amber-500" : ""}`}
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.5"
+                                    viewBox="0 0 24 24"
+                                  >
+                                    <path
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+                                    />
+                                  </svg>
+                                </button>
+                              </div>
                             )}
+
+                            {/* User prediction + points */}
+                            <div className="flex items-center gap-2">
+                              {pred ? (
+                                (() => {
+                                  const currentPoints = calculatePoints(pred.goals1, pred.goals2, liveGoals1Card, liveGoals2Card, match.group);
+                                  return (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs bg-slate-900 border border-slate-800 text-emerald-450 px-2 py-1 rounded-lg font-bold font-mono">
+                                        {pred.goals1} - {pred.goals2}
+                                      </span>
+                                      <span className={`text-[10px] font-bold px-2 py-1 rounded-lg border ${getPointsBadgeClass(currentPoints)}`}>
+                                        +{currentPoints} Pts {match.result?.isFinal === false ? "(Prov.)" : ""}
+                                      </span>
+                                    </div>
+                                  );
+                                })()
+                              ) : (
+                                <span className="text-[10px] text-rose-500 font-bold bg-rose-500/5 px-2.5 py-1 rounded-lg border border-rose-500/10">Sin pronóstico</span>
+                              )}
+                            </div>
                           </div>
 
                           {/* Running cumulative breakdown: standing before/after this match */}
                           {pred && (
-                            <div className="w-full flex justify-center">
-                              <PointsBreakdown
-                                prevPoints={pred.prevPoints}
-                                matchPoints={
-                                  match.result
-                                    ? calculatePoints(pred.goals1, pred.goals2, liveGoals1Card, liveGoals2Card, match.group)
-                                    : 0
-                                }
-                                afterMatchPoints={pred.afterMatchPoints}
-                                isLive={isLiveCard}
-                              />
-                            </div>
+                            <PointsBreakdown
+                              align="center"
+                              prevPoints={pred.prevPoints}
+                              matchPoints={
+                                match.result
+                                  ? calculatePoints(pred.goals1, pred.goals2, liveGoals1Card, liveGoals2Card, match.group)
+                                  : 0
+                              }
+                              afterMatchPoints={pred.afterMatchPoints}
+                              isLive={isLiveCard}
+                            />
                           )}
-                        </div>
+                        </>
                       )}
 
                       {/* Not started: show "locked" badge */}
