@@ -160,11 +160,16 @@ function buildCumulativeMatches(ms: Match[]): CumulativeMatch[] {
 }
 
 function hasMatchStarted(match: Match): boolean {
-  if (match.result != null) {
+  const kickoffPassed = Date.now() >= getMatchStartDate(match).getTime();
+  if (kickoffPassed) {
     return true;
   }
-  const startDate = getMatchStartDate(match);
-  return Date.now() >= startDate.getTime();
+  // Trust definitive final results even if kickoff metadata and local clock disagree.
+  return match.result != null && match.result.isFinal !== false;
+}
+
+function isMatchLive(match: Match): boolean {
+  return hasMatchStarted(match) && (match.result == null || match.result.isFinal === false);
 }
 
 // Only hides matches from PREVIOUS days, not today's matches (even if they already started/finished)
@@ -1538,11 +1543,13 @@ export default function Home() {
 
         const isFinished = fixture.finished === "TRUE";
         const isStarted = fixture.time_elapsed !== "notstarted";
+        const kickoffPassed = Date.now() >= getMatchStartDate(dbMatch).getTime();
 
         let resultChanged = false;
         let newResult = dbMatch.result;
 
-        if (isStarted || isFinished) {
+        // Ignore premature "live" scores from the API until kickoff time has passed.
+        if (isFinished || (isStarted && kickoffPassed)) {
           const goalsHome = parseInt(fixture.home_score, 10);
           const goalsAway = parseInt(fixture.away_score, 10);
 
@@ -2402,8 +2409,8 @@ export default function Home() {
                               const isSaving = savingMatches[match.id];
                               const hasResult = match.result != null;
                               const isFinal = match.result != null && match.result.isFinal !== false;
-                              const isLive = hasMatchStarted(match) && (match.result == null || match.result.isFinal === false);
-                              const isLocked = hasResult || hasMatchStarted(match);
+                              const isLive = isMatchLive(match);
+                              const isLocked = hasMatchStarted(match);
 
                               const matchDate = getMatchStartDate(match);
                               const localTimeStr = matchDate.toLocaleTimeString(undefined, {
@@ -2487,7 +2494,7 @@ export default function Home() {
                                         {!isLocked && (
                                           <button
                                             type="button"
-                                            disabled={hasResult || isSaving || hasMatchStarted(match)}
+                                            disabled={isLocked || isSaving}
                                             onClick={() => {
                                               const current = draft.goals1 === "" ? 0 : parseInt(draft.goals1, 10);
                                               const newVal = Math.max(0, isNaN(current) ? 0 : current - 1);
@@ -2506,7 +2513,7 @@ export default function Home() {
                                           inputMode="numeric"
                                           pattern="[0-9]*"
                                           value={draft.goals1}
-                                          disabled={hasResult || isSaving || hasMatchStarted(match)}
+                                          disabled={isLocked || isSaving}
                                           onChange={(e) => {
                                             const val = e.target.value.replace(/[^0-9]/g, "");
                                             setPredictionDrafts(prev => ({
@@ -2520,7 +2527,7 @@ export default function Home() {
                                         {!isLocked && (
                                           <button
                                             type="button"
-                                            disabled={hasResult || isSaving || hasMatchStarted(match)}
+                                            disabled={isLocked || isSaving}
                                             onClick={() => {
                                               const current = draft.goals1 === "" ? -1 : parseInt(draft.goals1, 10);
                                               const newVal = (isNaN(current) ? -1 : current) + 1;
@@ -2540,7 +2547,7 @@ export default function Home() {
                                         {!isLocked && (
                                           <button
                                             type="button"
-                                            disabled={hasResult || isSaving || hasMatchStarted(match)}
+                                            disabled={isLocked || isSaving}
                                             onClick={() => {
                                               const current = draft.goals2 === "" ? 0 : parseInt(draft.goals2, 10);
                                               const newVal = Math.max(0, isNaN(current) ? 0 : current - 1);
@@ -2559,7 +2566,7 @@ export default function Home() {
                                           inputMode="numeric"
                                           pattern="[0-9]*"
                                           value={draft.goals2}
-                                          disabled={hasResult || isSaving || hasMatchStarted(match)}
+                                          disabled={isLocked || isSaving}
                                           onChange={(e) => {
                                             const val = e.target.value.replace(/[^0-9]/g, "");
                                             setPredictionDrafts(prev => ({
@@ -2573,7 +2580,7 @@ export default function Home() {
                                         {!isLocked && (
                                           <button
                                             type="button"
-                                            disabled={hasResult || isSaving || hasMatchStarted(match)}
+                                            disabled={isLocked || isSaving}
                                             onClick={() => {
                                               const current = draft.goals2 === "" ? -1 : parseInt(draft.goals2, 10);
                                               const newVal = (isNaN(current) ? -1 : current) + 1;
@@ -2623,7 +2630,7 @@ export default function Home() {
                                     </span>
                                     {(() => {
                                       const isFinal = match.result != null && match.result.isFinal !== false;
-                                      const isLive = hasMatchStarted(match) && (match.result == null || match.result.isFinal === false);
+                                      const isLive = isMatchLive(match);
 
                                       if (isFinal) {
                                         return (
@@ -2713,7 +2720,7 @@ export default function Home() {
                                             : 0
                                         }
                                         afterMatchPoints={pred.afterMatchPoints}
-                                        isLive={match.result == null || match.result.isFinal === false}
+                                        isLive={isMatchLive(match)}
                                       />
                                     </div>
                                   )}
@@ -4038,7 +4045,7 @@ export default function Home() {
 
                   // Compute live state once for use in layout
                   const isFinalCard = match.result != null && match.result.isFinal !== false;
-                  const isLiveCard = hasStarted && (match.result == null || match.result.isFinal === false);
+                  const isLiveCard = isMatchLive(match);
                   const liveGoals1Card = match.result ? match.result.goals1 : 0;
                   const liveGoals2Card = match.result ? match.result.goals2 : 0;
 
